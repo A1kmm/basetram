@@ -1,0 +1,14 @@
+BaSeTraM (Bayesian Search for Transcription Factor Motifs) is a motif
+occurrence finding algorithm designed to search the entire genome for all
+occurrences of a particular motif, using as input a matrix of the form:
+
+  A_ij = the empirical frequency (as a raw count) at which base i was present
+         at position j from the start of the motif.
+
+It takes into account both uncertainty in the actual true base occurrence
+frequencies in the motif, and uncertainty as to whether there is a motif
+occurrence at a particular point in the genome, through the use of a Bayesian
+framework.
+
+Based on the above assumptions we have developed a principled approach to the
+finding of potential motif occurrences.
