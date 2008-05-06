@@ -21,6 +21,15 @@ namespace io = boost::iostreams;
 namespace fs = boost::filesystem;
 namespace ublas = boost::numeric::ublas;
 
+enum Base
+{
+  BASE_A = 0,
+  BASE_C,
+  BASE_G,
+  BASE_T,
+  BASE_N /* for undefined */
+};
+
 class Motif
 {
 public:
@@ -70,7 +79,7 @@ public:
   double
   getPosterior(
                uint32_t aIndex,
-               boost::circular_buffer<char>& aBaseQueue,
+               boost::circular_buffer<Base>& aBaseQueue,
                double aPA, double aPG, double aPC, double aPT
               )
   {
@@ -82,30 +91,34 @@ public:
 
     double* bb = mBaseProb;
 
-    boost::circular_buffer<char>::iterator i = aBaseQueue.begin() + aIndex,
+    boost::circular_buffer<Base>::iterator i = aBaseQueue.begin() + aIndex,
       e = i + mLength;
 
     for (; i != e; i++, bb += 4)
     {
       char base = *i;
-      switch (base)
+      if (base < BASE_G)
       {
-      case 'A': case 'a':
-        pD_given_H0 *= aPA;
-        pD_given_H1 *= bb[0];
-        continue;
-      case 'C': case 'c':
-        pD_given_H0 *= aPC;
-        pD_given_H1 *= bb[1];
-        continue;
-      case 'G': case 'g':
+        if (base == BASE_A)
+        {
+          pD_given_H0 *= aPA;
+          pD_given_H1 *= bb[0];
+        }
+        else
+        {
+          pD_given_H0 *= aPC;
+          pD_given_H1 *= bb[1];
+        }
+      }
+      else if (base == BASE_G)
+      {
         pD_given_H0 *= aPG;
-        pD_given_H1 *= bb[2];
-        continue;
-      case 'T': case 't':
+        pD_given_H1 *= bb[2];        
+      }
+      else
+      {
         pD_given_H0 *= aPT;
         pD_given_H1 *= bb[3];
-        continue;
       }
     }
 
@@ -248,8 +261,10 @@ public:
         flushBaseQueue();
 
       mBaseQueue.clear();
-      mAMajor = mAMinor = mGMajor = mGMinor = mCMajor = mCMinor = mTMajor =
-        mTMinor = mOffsetInto = 0;
+
+      memset(mMajorCounts, 0, sizeof(mMajorCounts));
+      memset(mMinorCounts, 0, sizeof(mMinorCounts));
+      mOffsetInto = 0;
       std::cout << "Locus = " << value << std::endl;
     }
   }
@@ -282,78 +297,54 @@ public:
     // std::cout << "Batch of data:" << std::endl;
     while ((base = *data++))
     {
-      if (base != 'a' && base != 'A' && base != 'g' && base != 'G' &&
-          base != 'c' && base != 'C' && base != 't' && base != 'T')
+      Base b;
+      switch (base)
+      {
+      case 'a': case 'A':
+        b = BASE_A;
+        break;
+      case 'c': case 'C':
+        b = BASE_C;
+        break;
+      case 'g': case 'G':
+        b = BASE_G;
+        break;
+      case 't': case 'T':
+        b = BASE_T;
+        break;
+      default:
         continue;
+      }
 
-      // std::cout << base;
-
-      pushBase(base);
+      pushBase(b);
     }
     // std::cout << std::endl;
   }
 private:
   void
-  getMajorCounts(char aBase, uint32_t** aMajor)
-  {
-    switch (aBase)
-    {
-    case 'a': case 'A':
-      *aMajor = &mAMajor;
-      return;
-    case 'g': case 'G':
-      *aMajor = &mGMajor;
-      return;
-    case 'c': case 'C':
-      *aMajor = &mCMajor;
-      return;
-    case 't': case 'T':
-      *aMajor = &mTMajor;
-      return;
-    }
-    assert(0); // aBase precondition violated.
-  }
-
-  void
-  getMinorCounts(char aBase, uint32_t** aMinor)
-  {
-    switch (aBase)
-    {
-    case 'a': case 'A':
-      *aMinor = &mAMinor;
-      return;
-    case 'g': case 'G':
-      *aMinor = &mGMinor;
-      return;
-    case 'c': case 'C':
-      *aMinor = &mCMinor;
-      return;
-    case 't': case 'T':
-      *aMinor = &mTMinor;
-      return;
-    }
-    assert(0); // aBase precondition violated.
-  }
-
-  void
-  pushBase(char aBase)
+  pushBase(Base aBase)
   {
     uint32_t * major, * minor;
 
     if (mBaseQueue.size() >= kMajorLocality * 2 + kMinorLocality * 2 + 1)
     {
-      getMajorCounts(mBaseQueue[0], &major);
-      (*major)--;
+      mMajorCounts[BASE_N*4 + mBaseQueue[0]]--;
+      mMajorCounts[mBaseQueue.front() * 4 + *(++mBaseQueue.begin())]--;
     }
 
-    getMajorCounts(aBase, &major);
-    (*major)++;
+    mMajorCounts[BASE_N*4 + aBase]++;
+    if (mBaseQueue.size() > 0)
+      mMajorCounts[mBaseQueue.back() * 4 + aBase]++;
 
     if (mBaseQueue.size() >= kMajorLocality + kMinorLocality * 2 + 1)
     {
-      char outgoing
+      Base outgoing
         (mBaseQueue[mBaseQueue.size() - (kMajorLocality +
                                          kMinorLocality * 2 + 1)]);
+      Base outgoing1
+        (mBaseQueue[mBaseQueue.size() - (kMajorLocality +
+                                         kMinorLocality * 2 + 1) + 1]);
+      mMinorCounts[BASE_N*4 + outgoing]--;
       getMinorCounts(outgoing, &minor);
       (*minor)--;
     }
@@ -471,9 +462,8 @@ private:
   static const unsigned int kMajorLocality = 500;
   static const unsigned int kMinorLocality = 50;
   static const double mPosteriorCutoff = 0.5;
-  uint32_t mAMajor, mAMinor, mGMajor, mGMinor, mCMajor, mCMinor,
-           mTMajor, mTMinor, mOffsetInto;
-  boost::circular_buffer<char> mBaseQueue;
+  uint32_t mMajorCounts[5 * 4], mMinorCounts[5 * 4], mOffsetInto;
+  boost::circular_buffer<Base> mBaseQueue;
 
   std::list<Motif*> motifs;
   GenBankParser* mGBP;
