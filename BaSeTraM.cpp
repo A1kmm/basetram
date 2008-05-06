@@ -30,36 +30,41 @@ public:
     uint32_t max_n = 0;
 
     mLength = aRawFreqD.size1();
-    uint32_t rawFreq[mLength * 4];
-    mBetaBi = new double[mLength * 4];
+    mBaseProb = new double[mLength * 4];
 
     for (uint32_t i = 0; i < mLength; i++)
     {
       uint32_t n_i = 0;
+      uint32_t rawFreq[4];
+
       for (uint32_t b = 0; b < 4; b++)
-        n_i += (rawFreq[i * 4 + b] = static_cast<uint32_t>(::round(aRawFreqD(i, b))));
+      {
+        rawFreq[b] = static_cast<uint32_t>(::round(aRawFreqD(i, b)));
+        n_i += rawFreq[b];
+      }
 
       max_n = std::max(n_i, max_n);
 
       for (uint32_t b = 0; b < 4; b++)
       {
-        uint32_t f_ib(rawFreq[4*i + b]);
-        mBetaBi[4 * i + b] =
-          boost::math::beta<double>(f_ib + 2.0, n_i - f_ib + 1.0) *
-          boost::math::binomial_coefficient<double>(n_i, f_ib);
+        uint32_t f_ib(rawFreq[b]);
+        mBaseProb[4 * i + b] =
+          boost::math::beta<double>(f_ib + 2.0, n_i - f_ib + 1.0)
+          /
+          boost::math::beta<double>(f_ib + 1.0, n_i - f_ib + 1.0);
       }
     }
 
     // XXX should we make the prior configurable or something? For now, just
-    // assume that of 4 billion possible positions, we have found 1/1000th of
+    // assume that of 4 billion possible positions, we have found 1/10th of
     // them. This is unavoidably a total guess.
-    mH1 = max_n * (1000.0 / 4.0E9);
+    mH1 = max_n * (10.0 / 4.0E9);
     mH0 = 1.0 - mH1;
   }
 
   ~Motif()
   {
-    delete [] mBetaBi;
+    delete [] mBaseProb;
   }
 
   double
@@ -75,31 +80,33 @@ public:
 
     double pD_given_H1 = 1.0, pD_given_H0 = 1.0;
 
-    double* bb = mBetaBi;
-    for (uint32_t i = 0; i < mLength; i++, bb += 4)
+    double* bb = mBaseProb;
+
+    boost::circular_buffer<char>::iterator i = aBaseQueue.begin() + aIndex,
+      e = i + mLength;
+
+    for (; i != e; i++, bb += 4)
     {
-      char base = aBaseQueue[aIndex + i];
-      uint32_t b = 0;
+      char base = *i;
       switch (base)
       {
       case 'A': case 'a':
         pD_given_H0 *= aPA;
-        break;
+        pD_given_H1 *= bb[0];
+        continue;
       case 'C': case 'c':
-        b = 1;
         pD_given_H0 *= aPC;
-        break;
+        pD_given_H1 *= bb[1];
+        continue;
       case 'G': case 'g':
-        b = 2;
         pD_given_H0 *= aPG;
-        break;
+        pD_given_H1 *= bb[2];
+        continue;
       case 'T': case 't':
-        b = 3;
         pD_given_H0 *= aPT;
-        break;
+        pD_given_H1 *= bb[3];
+        continue;
       }
-
-      pD_given_H1 *= bb[b];
     }
 
     return mH1 * pD_given_H1 / (mH1 * pD_given_H1 + mH0 * pD_given_H0);
@@ -114,7 +121,7 @@ public:
 private:
   std::string mAccession;
   uint32_t mLength;
-  double* mBetaBi;
+  double* mBaseProb;
   double mH1, mH0;
 };
 
@@ -271,14 +278,19 @@ public:
   CodingData(const char* data)
   {
     char base;
+
+    // std::cout << "Batch of data:" << std::endl;
     while ((base = *data++))
     {
       if (base != 'a' && base != 'A' && base != 'g' && base != 'G' &&
           base != 'c' && base != 'C' && base != 't' && base != 'T')
         continue;
 
+      // std::cout << base;
+
       pushBase(base);
     }
+    // std::cout << std::endl;
   }
 private:
   void
@@ -425,6 +437,29 @@ private:
         std::cout << "At offset " << mOffsetInto << ": Match "
                   << (*i)->getAccession() << " with probability "
                   << pp << std::endl;
+        std::cout << "Context: "
+                  << mBaseQueue[index]
+                  << mBaseQueue[index + 1]
+                  << mBaseQueue[index + 2]
+                  << mBaseQueue[index + 3]
+                  << mBaseQueue[index + 4]
+                  << mBaseQueue[index + 5]
+                  << mBaseQueue[index + 6]
+                  << mBaseQueue[index + 7]
+                  << mBaseQueue[index + 8]
+                  << mBaseQueue[index + 9]
+                  << mBaseQueue[index + 10]
+                  << mBaseQueue[index + 11]
+                  << mBaseQueue[index + 12]
+                  << mBaseQueue[index + 13]
+                  << mBaseQueue[index + 14]
+                  << mBaseQueue[index + 15]
+                  << mBaseQueue[index + 16]
+                  << mBaseQueue[index + 17]
+                  << mBaseQueue[index + 18]
+                  << mBaseQueue[index + 19]
+                  << std::endl;
+
       }
     }
 
@@ -472,5 +507,9 @@ main(int argc, char** argv)
   BayesianSearcher searcher(fsmatrices);
 
   for (fs::directory_iterator it(genbank); it != fs::directory_iterator(); it++)
+  {
+    if (fs::extension(it->path()) != ".gbk")
+      continue;
     searcher.search(it->path().string());
+  }
 }
