@@ -12,6 +12,8 @@
 #include <boost/math/special_functions/beta.hpp>
 #include <boost/math/special_functions/binomial.hpp>
 #include <boost/circular_buffer.hpp>
+#include <boost/lambda/lambda.hpp>
+#include <boost/lambda/bind.hpp>
 #include <cmath>
 #include <assert.h>
 #include "../parsegenbank/GenbankParser.hpp"
@@ -20,7 +22,7 @@ namespace po = boost::program_options;
 namespace io = boost::iostreams;
 namespace fs = boost::filesystem;
 namespace ublas = boost::numeric::ublas;
-
+namespace ll = boost::lambda;
 enum Base
 {
   BASE_A = 0,
@@ -78,51 +80,22 @@ public:
 
   double
   getPosterior(
-               uint32_t aIndex,
-               boost::circular_buffer<Base>& aBaseQueue,
-               double aPA, double aPG, double aPC, double aPT
+               double pD_given_H0, double pD_given_H1
               )
   {
-    // Impossible if we don't have enough data...
-    if (aIndex + mLength >= aBaseQueue.size())
-      return 0.0;
-
-    double pD_given_H1 = 1.0, pD_given_H0 = 1.0;
-
-    double* bb = mBaseProb;
-
-    boost::circular_buffer<Base>::iterator i = aBaseQueue.begin() + aIndex,
-      e = i + mLength;
-
-    for (; i != e; i++, bb += 4)
-    {
-      char base = *i;
-      if (base < BASE_G)
-      {
-        if (base == BASE_A)
-        {
-          pD_given_H0 *= aPA;
-          pD_given_H1 *= bb[0];
-        }
-        else
-        {
-          pD_given_H0 *= aPC;
-          pD_given_H1 *= bb[1];
-        }
-      }
-      else if (base == BASE_G)
-      {
-        pD_given_H0 *= aPG;
-        pD_given_H1 *= bb[2];        
-      }
-      else
-      {
-        pD_given_H0 *= aPT;
-        pD_given_H1 *= bb[3];
-      }
-    }
 
     return mH1 * pD_given_H1 / (mH1 * pD_given_H1 + mH0 * pD_given_H0);
+  }
+
+  double getAlternativeProbability(uint32_t position, Base b)
+  {
+    return mBaseProb[position * 4 + b];
+  }
+
+  uint32_t
+  getLength() const
+  {
+    return mLength;
   }
 
   const std::string&
@@ -159,6 +132,8 @@ public:
     ublas::matrix<double> matrix;
     uint32_t max = 0;
 
+    mMaxLength = 0;
+
     while (aMatrices.good())
     {
       std::getline(aMatrices, l);
@@ -189,6 +164,7 @@ public:
 
           // We now have a matrix of doubles. Put it on the list...
           motifs.push_back(new Motif(acc, matrix));
+          mMaxLength = std::max(mMaxLength, matrix.size1());
         }
 
         basis = 0;
@@ -222,16 +198,30 @@ public:
       else if (boost::regex_match(l, res, AcPat))
         acc = res[1];
     }
-    
+
+    mAltProbs = new double[motifs.size()];
+    std::sort(motifs.begin(), motifs.end(),
+              ll::bind(&Motif::getLength, ll::_1) >
+              ll::bind(&Motif::getLength, ll::_2));
+
+    std::vector<Motif*>::iterator i(motifs.begin());
+    for (uint32_t x = 0; x <= mMaxLength; x++)
+    {
+      while (i != motifs.end() && (*i)->getLength() < x)
+        i++;
+      mMotifLengthEnds.push_back(i);
+    }
   }
 
   ~BayesianSearcher()
   {
-    std::list<Motif*>::iterator i;
+    std::vector<Motif*>::iterator i;
     for (i = motifs.begin(); i != motifs.end(); i++)
       delete (*i);
 
     delete mGBP;
+
+    delete [] mAltProbs;
   }
 
   void
@@ -328,7 +318,7 @@ private:
 
     if (mBaseQueue.size() >= kMajorLocality * 2 + kMinorLocality * 2 + 1)
     {
-      mMajorCounts[BASE_N*4 + mBaseQueue[0]]--;
+      mMajorCounts[BASE_N*4 + mBaseQueue.front()]--;
       mMajorCounts[mBaseQueue.front() * 4 + *(++mBaseQueue.begin())]--;
     }
 
@@ -344,9 +334,8 @@ private:
       Base outgoing1
         (mBaseQueue[mBaseQueue.size() - (kMajorLocality +
                                          kMinorLocality * 2 + 1) + 1]);
-      mMinorCounts[BASE_N*4 + outgoing]--;
-      getMinorCounts(outgoing, &minor);
-      (*minor)--;
+      mMinorCounts[BASE_N*4 + outgoing1]--;
+      mMinorCounts[outgoing * 4 + outgoing1]--;
     }
 
     mBaseQueue.push_back(aBase);
@@ -355,14 +344,19 @@ private:
     {
       for (uint32_t i = 0; i < kMinorLocality + 1; i++)
       {
-        getMinorCounts(mBaseQueue[i], &minor);
-        (*minor)++;
+        Base incoming(mBaseQueue[i]);
+        Base incoming1(mBaseQueue[i + 1]);
+        mMinorCounts[BASE_N*4 + incoming1]++;
+        mMinorCounts[incoming*4 + incoming1]++;
       }
     }
     else if (mBaseQueue.size() > kMajorLocality + kMinorLocality + 1)
     {
-      getMinorCounts(mBaseQueue[mBaseQueue.size() - kMajorLocality - 1], &minor);
-      (*minor)++;
+      Base incoming(mBaseQueue[mBaseQueue.size() - kMajorLocality - 1]);
+      Base incoming1(mBaseQueue[mBaseQueue.size() - kMajorLocality]);
+
+      mMinorCounts[BASE_N*4 + incoming1]++;
+      mMinorCounts[incoming * 4 + incoming1]++;
     }
 
     if (mBaseQueue.size() >= kMajorLocality + kMinorLocality + 1)
@@ -384,14 +378,18 @@ private:
     {
       if (index >= kMajorLocality + kMinorLocality + 2)
       {
-        getMajorCounts(mBaseQueue[index - kMajorLocality - kMinorLocality - 2], &major);
-        (*major)--;
+        Base outgoing(mBaseQueue[index - kMajorLocality - kMinorLocality - 2]);
+        Base outgoing1(mBaseQueue[index - kMajorLocality - kMinorLocality - 1]);
+        mMajorCounts[BASE_N*4 + outgoing1]--;
+        mMajorCounts[outgoing*4 + outgoing1]--;
       }
 
       if (index >= kMinorLocality + 2)
       {
-        getMinorCounts(mBaseQueue[index - kMinorLocality - 2], &minor);
-        (*minor)--;
+        Base outgoing(mBaseQueue[index - kMinorLocality - 2]);
+        Base outgoing1(mBaseQueue[index - kMinorLocality - 1]);
+        mMinorCounts[BASE_N*4 + outgoing1]--;
+        mMinorCounts[outgoing*4 + outgoing1]--;
       }
 
       processFrameAt(index);
@@ -403,26 +401,62 @@ private:
   void
   processFrameAt(uint32_t index)
   {
-    // Now compute the local base frequencies as the average of the major and
-    // minor moving averages...
-    uint32_t majorCount(mBaseQueue.size());
-    uint32_t minorCount(std::min(mBaseQueue.size(), kMinorLocality * 2 + 1));
-    double imajorCount2(1.0 / (2.0 * majorCount));
-    double iminorCount2(1.0 / (2.0 * minorCount));
-    
-    double freqA(imajorCount2 * mAMajor + iminorCount2 * mAMinor);
-    double freqG(imajorCount2 * mGMajor + iminorCount2 * mGMinor);
-    double freqC(imajorCount2 * mCMajor + iminorCount2 * mCMinor);
-    double freqT(imajorCount2 * mTMajor + iminorCount2 * mTMinor);
+    // Firstly, we convert our 5*4 tables into frequencies...
+    for (uint32_t row = BASE_A; row <= BASE_N; row++)
+    {
+      uint32_t totMaj, totMin;
+      for (uint32_t col = BASE_A; col < BASE_N; col++)
+      {
+        totMaj += mMajorCounts[row * 4 + col];
+        totMin += mMinorCounts[row * 4 + col];
+      }
+
+      for (uint32_t col = BASE_A; col < BASE_N; col++)      
+        mFreqTab[row * 4 + col] =
+          (
+           static_cast<double>(mMajorCounts[row * 4 + col]) /
+           totMaj
+           +
+           static_cast<double>(mMinorCounts[row * 4 + col]) /
+           totMin
+          ) / 2.0;
+    }
 
     mOffsetInto++;
 
-    // Now we go through all the motifs and look for matches...
-    std::list<Motif*>::iterator i;
-    for (i = motifs.begin(); i != motifs.end(); i++)
+    // Next we go through each base and build the probability of the data
+    // given the null hypothesis, and for each motif, the probability of the
+    // alternative hypothesis.
+    boost::circular_buffer<Base>::iterator bi(mBaseQueue.begin() + index);
+    std::vector<std::vector<Motif*>::iterator>::iterator
+      mlei(mMotifLengthEnds.begin());
+
+    Base prev = BASE_N;
+    double pBackground = 1.0;
+    for (double* p = mAltProbs; p < mAltProbs + motifs.size(); p++)
+      *p = 1.0;
+
+    if (mMaxLength >= mBaseQueue.size())
+      return;
+
+    for (uint32_t l = 0;
+         l <= mMaxLength;
+         l++, mlei++)
     {
-      double pp;
-      pp = (*i)->getPosterior(index, mBaseQueue, freqA, freqG, freqC, freqT);
+      Base cur = *bi++;
+      pBackground *= mFreqTab[prev * 4 + cur];
+
+      for (std::vector<Motif*>::iterator i = *mlei;
+           i != motifs.end();
+           i++)
+        mAltProbs[i - motifs.begin()] *= (*i)->getAlternativeProbability(l, cur);
+    }
+
+    for (std::vector<Motif*>::iterator i = motifs.begin();
+         i != motifs.end();
+         i++)
+    {
+      double pp = (*i)->getPosterior(pBackground, mAltProbs[i - motifs.begin()]);
       if (pp > mPosteriorCutoff)
       {
         std::cout << "At offset " << mOffsetInto << ": Match "
@@ -450,22 +484,22 @@ private:
                   << mBaseQueue[index + 18]
                   << mBaseQueue[index + 19]
                   << std::endl;
-
       }
     }
-
-    // std::cout << freqA << "," << freqG << "," << freqC << "," << freqT
-    // << std::endl;
   }
 
   // Look-ahead an look-behind contexts for background frequency table.
-  static const unsigned int kMajorLocality = 500;
-  static const unsigned int kMinorLocality = 50;
+  static const size_t kMajorLocality = 500;
+  static const size_t kMinorLocality = 50;
   static const double mPosteriorCutoff = 0.5;
   uint32_t mMajorCounts[5 * 4], mMinorCounts[5 * 4], mOffsetInto;
+  double mFreqTab[5 * 4];
   boost::circular_buffer<Base> mBaseQueue;
+  std::vector<std::vector<Motif*>::iterator > mMotifLengthEnds;
+  size_t mMaxLength;
+  double *mAltProbs;
 
-  std::list<Motif*> motifs;
+  std::vector<Motif*> motifs;
   GenBankParser* mGBP;
 };
 
