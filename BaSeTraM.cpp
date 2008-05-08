@@ -67,9 +67,9 @@ public:
     }
 
     // XXX should we make the prior configurable or something? For now, just
-    // assume that of 4 billion possible positions, we have found 1/10th of
+    // assume that of 4 billion possible positions, we have found 1/100th of
     // them. This is unavoidably a total guess.
-    mH1 = max_n * (10.0 / 4.0E9);
+    mH1 = max_n * (100.0 / 4.0E9);
     mH0 = 1.0 - mH1;
   }
 
@@ -89,7 +89,7 @@ public:
 
   double getAlternativeProbability(uint32_t position, Base b)
   {
-    return mBaseProb[position * 4 + b];
+    return mBaseProb[(position << 2) + b];
   }
 
   uint32_t
@@ -201,16 +201,17 @@ public:
 
     mAltProbs = new double[motifs.size()];
     std::sort(motifs.begin(), motifs.end(),
-              ll::bind(&Motif::getLength, ll::_1) >
+              ll::bind(&Motif::getLength, ll::_1) <
               ll::bind(&Motif::getLength, ll::_2));
 
     std::vector<Motif*>::iterator i(motifs.begin());
-    for (uint32_t x = 0; x <= mMaxLength; x++)
+    for (uint32_t x = 0; x < mMaxLength; x++)
     {
-      while (i != motifs.end() && (*i)->getLength() < x)
+      while (i != motifs.end() && (*i)->getLength() - 1 < x)
         i++;
       mMotifLengthEnds.push_back(i);
     }
+    mMotifLengthEnds.push_back(motifs.end());
   }
 
   ~BayesianSearcher()
@@ -404,14 +405,14 @@ private:
     // Firstly, we convert our 5*4 tables into frequencies...
     for (uint32_t row = BASE_A; row <= BASE_N; row++)
     {
-      uint32_t totMaj, totMin;
+      uint32_t totMaj = 0, totMin = 0;
       for (uint32_t col = BASE_A; col < BASE_N; col++)
       {
         totMaj += mMajorCounts[row * 4 + col];
         totMin += mMinorCounts[row * 4 + col];
       }
 
-      for (uint32_t col = BASE_A; col < BASE_N; col++)      
+      for (uint32_t col = BASE_A; col < BASE_N; col++)
         mFreqTab[row * 4 + col] =
           (
            static_cast<double>(mMajorCounts[row * 4 + col]) /
@@ -440,57 +441,57 @@ private:
       return;
 
     for (uint32_t l = 0;
-         l <= mMaxLength;
+         l < mMaxLength;
          l++, mlei++)
     {
       Base cur = *bi++;
       pBackground *= mFreqTab[prev * 4 + cur];
+      prev = cur;
 
       for (std::vector<Motif*>::iterator i = *mlei;
            i != motifs.end();
            i++)
         mAltProbs[i - motifs.begin()] *= (*i)->getAlternativeProbability(l, cur);
-    }
 
-    for (std::vector<Motif*>::iterator i = motifs.begin();
-         i != motifs.end();
-         i++)
-    {
-      double pp = (*i)->getPosterior(pBackground, mAltProbs[i - motifs.begin()]);
-      if (pp > mPosteriorCutoff)
+      for (std::vector<Motif*>::iterator i = *mlei; i != *(mlei + 1); i++)
       {
-        std::cout << "At offset " << mOffsetInto << ": Match "
-                  << (*i)->getAccession() << " with probability "
-                  << pp << std::endl;
-        std::cout << "Context: "
-                  << mBaseQueue[index]
-                  << mBaseQueue[index + 1]
-                  << mBaseQueue[index + 2]
-                  << mBaseQueue[index + 3]
-                  << mBaseQueue[index + 4]
-                  << mBaseQueue[index + 5]
-                  << mBaseQueue[index + 6]
-                  << mBaseQueue[index + 7]
-                  << mBaseQueue[index + 8]
-                  << mBaseQueue[index + 9]
-                  << mBaseQueue[index + 10]
-                  << mBaseQueue[index + 11]
-                  << mBaseQueue[index + 12]
-                  << mBaseQueue[index + 13]
-                  << mBaseQueue[index + 14]
-                  << mBaseQueue[index + 15]
-                  << mBaseQueue[index + 16]
-                  << mBaseQueue[index + 17]
-                  << mBaseQueue[index + 18]
-                  << mBaseQueue[index + 19]
-                  << std::endl;
+        double pp = (*i)->getPosterior(pBackground, mAltProbs[i - motifs.begin()]);
+        if (pp > mPosteriorCutoff)
+        {
+          const char* t = "ACGT";
+          std::cout << "At offset " << mOffsetInto << ": Match "
+                    << (*i)->getAccession() << " with probability "
+                    << pp << std::endl;
+          std::cout << "Context: "
+                    << t[mBaseQueue[index]]
+                    << t[mBaseQueue[index + 1]]
+                    << t[mBaseQueue[index + 2]]
+                    << t[mBaseQueue[index + 3]]
+                    << t[mBaseQueue[index + 4]]
+                    << t[mBaseQueue[index + 5]]
+                    << t[mBaseQueue[index + 6]]
+                    << t[mBaseQueue[index + 7]]
+                    << t[mBaseQueue[index + 8]]
+                    << t[mBaseQueue[index + 9]]
+                    << t[mBaseQueue[index + 10]]
+                    << t[mBaseQueue[index + 11]]
+                    << t[mBaseQueue[index + 12]]
+                    << t[mBaseQueue[index + 13]]
+                    << t[mBaseQueue[index + 14]]
+                    << t[mBaseQueue[index + 15]]
+                    << t[mBaseQueue[index + 16]]
+                    << t[mBaseQueue[index + 17]]
+                    << t[mBaseQueue[index + 18]]
+                    << t[mBaseQueue[index + 19]]
+                    << std::endl;
+        }
       }
     }
   }
 
   // Look-ahead an look-behind contexts for background frequency table.
-  static const size_t kMajorLocality = 500;
-  static const size_t kMinorLocality = 50;
+  static const size_t kMajorLocality = 1000;
+  static const size_t kMinorLocality = 250;
   static const double mPosteriorCutoff = 0.5;
   uint32_t mMajorCounts[5 * 4], mMinorCounts[5 * 4], mOffsetInto;
   double mFreqTab[5 * 4];
