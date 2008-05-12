@@ -17,12 +17,26 @@
 #include <cmath>
 #include <assert.h>
 #include "../parsegenbank/GenbankParser.hpp"
+#include <sys/time.h>
+#include <time.h>
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/date_time/microsec_time_clock.hpp>
+
+#ifndef __GNUC__
+#define USUALLY(x) x
+#define RARELY(x) x
+#else
+#define USUALLY(x) __builtin_expect(!!(x), 1)
+#define RARELY(x) __builtin_expect(!!(x), 0)
+#endif
 
 namespace po = boost::program_options;
 namespace io = boost::iostreams;
 namespace fs = boost::filesystem;
 namespace ublas = boost::numeric::ublas;
 namespace ll = boost::lambda;
+namespace pt = boost::posix_time;
+
 enum Base
 {
   BASE_A = 0,
@@ -31,6 +45,8 @@ enum Base
   BASE_T,
   BASE_N /* for undefined */
 };
+
+pt::ptime gStartupTime;
 
 class Motif
 {
@@ -256,7 +272,8 @@ public:
       memset(mMajorCounts, 0, sizeof(mMajorCounts));
       memset(mMinorCounts, 0, sizeof(mMinorCounts));
       mOffsetInto = 0;
-      std::cout << "Locus = " << value << std::endl;
+      std::cout << "LOCUS       " << value << std::endl
+                << "FEATURES             Location/Qualifiers" << std::endl;
     }
   }
 
@@ -403,16 +420,16 @@ private:
   processFrameAt(uint32_t index)
   {
     // Firstly, we convert our 5*4 tables into frequencies...
-    for (uint32_t row = BASE_A; row <= BASE_N; row++)
+    for (uint32_t row = BASE_A; USUALLY(row <= BASE_N); row++)
     {
       uint32_t totMaj = 0, totMin = 0;
-      for (uint32_t col = BASE_A; col < BASE_N; col++)
+      for (uint32_t col = BASE_A; USUALLY(col < BASE_N); col++)
       {
         totMaj += mMajorCounts[row * 4 + col];
         totMin += mMinorCounts[row * 4 + col];
       }
 
-      for (uint32_t col = BASE_A; col < BASE_N; col++)
+      for (uint32_t col = BASE_A; USUALLY(col < BASE_N); col++)
         mFreqTab[row * 4 + col] =
           (
            static_cast<double>(mMajorCounts[row * 4 + col]) /
@@ -425,6 +442,22 @@ private:
 
     mOffsetInto++;
 
+#ifdef TIME_PROFILING
+    if (mOffsetInto > 1000000)
+    {
+      pt::ptime stopTime(pt::microsec_clock::universal_time());
+      pt::time_duration runTime(stopTime - gStartupTime);
+      std::cout << "1 megabase in "
+                << runTime.hours() << " hours, "
+                << runTime.minutes() << " minutes, "
+                << runTime.seconds() << " seconds, "
+                << runTime.fractional_seconds() << " microseconds."
+                << std::endl;
+      
+      exit(0);
+    }
+#endif
+
     // Next we go through each base and build the probability of the data
     // given the null hypothesis, and for each motif, the probability of the
     // alternative hypothesis.
@@ -434,34 +467,42 @@ private:
 
     Base prev = BASE_N;
     double pBackground = 1.0;
-    for (double* p = mAltProbs; p < mAltProbs + motifs.size(); p++)
+    const double* e = mAltProbs + motifs.size();
+    for (double* p = mAltProbs; USUALLY(p < e); p++)
       *p = 1.0;
 
-    if (mMaxLength >= mBaseQueue.size())
+    if (RARELY(mMaxLength >= mBaseQueue.size()))
       return;
 
     for (uint32_t l = 0;
-         l < mMaxLength;
+         USUALLY(l < mMaxLength);
          l++, mlei++)
     {
       Base cur = *bi++;
       pBackground *= mFreqTab[prev * 4 + cur];
       prev = cur;
 
-      for (std::vector<Motif*>::iterator i = *mlei;
-           i != motifs.end();
+      double* ap = mAltProbs + (*mlei - motifs.begin());
+      
+      for (std::vector<Motif*>::iterator i = *mlei, e = motifs.end();
+           USUALLY(i != e);
            i++)
-        mAltProbs[i - motifs.begin()] *= (*i)->getAlternativeProbability(l, cur);
+        *ap++ *= (*i)->getAlternativeProbability(l, cur);
 
-      for (std::vector<Motif*>::iterator i = *mlei; i != *(mlei + 1); i++)
+      for (std::vector<Motif*>::iterator i = *mlei, e = *(mlei + 1);
+           USUALLY(i != e); i++)
       {
         double pp = (*i)->getPosterior(pBackground, mAltProbs[i - motifs.begin()]);
         if (pp > mPosteriorCutoff)
         {
           const char* t = "ACGT";
-          std::cout << "At offset " << mOffsetInto << ": Match "
-                    << (*i)->getAccession() << " with probability "
-                    << pp << std::endl;
+          std::cout << "     TFBS            " << mOffsetInto << ".."
+                    << (mOffsetInto + (*i)->getLength()) << std::endl
+                    << "                     /probability=\""
+                    << pp << "\"" << std::endl
+                    << "                     /db_xref=\"TRANSFAC:"
+                    << (*i)->getAccession() << "\"" << std::endl;
+#if 0
           std::cout << "Context: "
                     << t[mBaseQueue[index]]
                     << t[mBaseQueue[index + 1]]
@@ -484,6 +525,7 @@ private:
                     << t[mBaseQueue[index + 18]]
                     << t[mBaseQueue[index + 19]]
                     << std::endl;
+#endif
         }
       }
     }
@@ -530,6 +572,8 @@ main(int argc, char** argv)
   fsmatrices.push(io::file_source(matrices));
 
   BayesianSearcher searcher(fsmatrices);
+
+  gStartupTime = pt::microsec_clock::universal_time();
 
   for (fs::directory_iterator it(genbank); it != fs::directory_iterator(); it++)
   {
