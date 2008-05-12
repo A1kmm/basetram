@@ -131,8 +131,9 @@ class BayesianSearcher
   : public GenBankSink
 {
 public:
-  BayesianSearcher(std::istream& aMatrices)
-    : mGBP(NewGenBankParser()), mBaseQueue(1 + kMinorLocality * 2 + kMajorLocality * 2)
+  BayesianSearcher(std::istream& aMatrices, const fs::path& aOutputDir)
+    : mGBP(NewGenBankParser()), mBaseQueue(1 + kMinorLocality * 2 + kMajorLocality * 2),
+      mOutputDirectory(aOutputDir)
   {
     static const boost::regex AcPat("^AC[ \\t]+(.*)$");
     static const boost::regex BaPat("^BA[ \\t]+[ \\t]+([0-9]+)[ \\t]+.*$");
@@ -244,6 +245,10 @@ public:
   void
   search(const std::string& aFile)
   {
+    mChromosomeOutput = mOutputDirectory;
+    mChromosomeOutput /= fs::basename(aFile);
+    fs::create_directories(mChromosomeOutput);
+
     TextSource* ts = NewBufferedFileSource(aFile.c_str());
     mGBP->SetSource(ts);
     try
@@ -271,9 +276,19 @@ public:
 
       memset(mMajorCounts, 0, sizeof(mMajorCounts));
       memset(mMinorCounts, 0, sizeof(mMinorCounts));
+
+      if (mSegmentOutput.is_open())
+        mSegmentOutput.close();
+
+      fs::path mSegmentFile = mChromosomeOutput;
+      std::string locus(value);
+      size_t pos = locus.find(" ");
+      mSegmentFile /= locus.substr(0, pos);
+      mSegmentOutput.open(mSegmentFile.string().c_str());
+
       mOffsetInto = 0;
-      std::cout << "LOCUS       " << value << std::endl
-                << "FEATURES             Location/Qualifiers" << std::endl;
+      mSegmentOutput << "LOCUS       " << value << std::endl
+                     << "FEATURES             Location/Qualifiers" << std::endl;
     }
   }
 
@@ -496,12 +511,12 @@ private:
         if (pp > mPosteriorCutoff)
         {
           const char* t = "ACGT";
-          std::cout << "     TFBS            " << mOffsetInto << ".."
-                    << (mOffsetInto + (*i)->getLength()) << std::endl
-                    << "                     /probability=\""
-                    << pp << "\"" << std::endl
-                    << "                     /db_xref=\"TRANSFAC:"
-                    << (*i)->getAccession() << "\"" << std::endl;
+          mSegmentOutput << "     TFBS            " << mOffsetInto << ".."
+                         << (mOffsetInto + (*i)->getLength()) << std::endl
+                         << "                     /probability=\""
+                         << pp << "\"" << std::endl
+                         << "                     /db_xref=\"TRANSFAC:"
+                         << (*i)->getAccession() << "\"" << std::endl;
 #if 0
           std::cout << "Context: "
                     << t[mBaseQueue[index]]
@@ -542,6 +557,10 @@ private:
   size_t mMaxLength;
   double *mAltProbs;
 
+  const fs::path& mOutputDirectory;
+  fs::path mChromosomeOutput;
+  std::ofstream mSegmentOutput;
+
   std::vector<Motif*> motifs;
   GenBankParser* mGBP;
 };
@@ -549,17 +568,38 @@ private:
 int
 main(int argc, char** argv)
 {
-  std::string matrices, genbank;
+  std::string matrices, genbank, outdir;
 
   po::options_description desc("Allowed options");
   desc.add_options()
     ("matrices", po::value<std::string>(&matrices), "TRANSFAC format matrices file")
     ("genbank", po::value<std::string>(&genbank), "Directory containing GenBank files")
+    ("outdir", po::value<std::string>(&outdir), "Top-level directory for results")
+    ("help", "produce help message")
     ;
 
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
   po::notify(vm);
+
+  std::string wrong;
+  if (!vm.count("help"))
+  {
+    if (!vm.count("matrices"))
+      wrong = "matrices";
+    else if (!vm.count("genbank"))
+      wrong = "genbank";
+    else if (!vm.count("outdir"))
+      wrong = "outdir";
+  }
+
+  if (wrong != "")
+    std::cerr << "Missing option: " << wrong << std::endl;
+  if (vm.count("help") || wrong != "")
+  {
+    std::cout << desc << std::endl;
+    return 1;
+  }
 
   if (!fs::is_directory(genbank))
   {
@@ -568,10 +608,18 @@ main(int argc, char** argv)
     return 1;
   }
 
+  if (!fs::is_directory(outdir))
+  {
+    std::cerr << "Supplied output 'directory' is not a valid directory."
+              << std::endl;
+    return 1;
+  }
+
   io::filtering_istream fsmatrices;
   fsmatrices.push(io::file_source(matrices));
 
-  BayesianSearcher searcher(fsmatrices);
+  fs::path outdirp(outdir);
+  BayesianSearcher searcher(fsmatrices, outdirp);
 
   gStartupTime = pt::microsec_clock::universal_time();
 
