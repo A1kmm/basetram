@@ -51,13 +51,13 @@ pt::ptime gStartupTime;
 class Motif
 {
 public:
-  Motif(const std::string& aAccession, ublas::matrix<double> aRawFreqD)
-    : mAccession(aAccession)
+  Motif(const std::string& aAccession, ublas::matrix<float> aRawFreqD)
+    : mAccession(aAccession), mReverseComplement(false), mNotChunked(true)
   {
     uint32_t max_n = 0;
 
     mLength = aRawFreqD.size1();
-    mBaseProb = new double[mLength * 4];
+    mBaseProb = new float[mLength * 4];
 
     for (uint32_t i = 0; i < mLength; i++)
     {
@@ -76,9 +76,9 @@ public:
       {
         uint32_t f_ib(rawFreq[b]);
         mBaseProb[4 * i + b] =
-          boost::math::beta<double>(f_ib + 2.0, n_i - f_ib + 1.0)
+          boost::math::beta<float>(f_ib + 2.0, n_i - f_ib + 1.0)
           /
-          boost::math::beta<double>(f_ib + 1.0, n_i - f_ib + 1.0);
+          boost::math::beta<float>(f_ib + 1.0, n_i - f_ib + 1.0);
       }
     }
 
@@ -89,21 +89,51 @@ public:
     mH0 = 1.0 - mH1;
   }
 
-  ~Motif()
+  Motif(const Motif& aM, bool aComplement)
+    : mAccession(aM.getAccession()), mLength(aM.getLength()),
+      mH1(aM.getH1()), mH0(aM.getH0()),
+      mReverseComplement(aM.isReverseComplement()),
+      mNotChunked(true)
   {
-    delete [] mBaseProb;
+    mBaseProb = new float[mLength * 4];
+    if (!aComplement)
+      memcpy(mBaseProb, aM.getBaseProb(), mLength * 4 * sizeof(float));
+    else
+    {
+      const float* oldProbs = aM.getBaseProb();
+
+      const Base complements[] =
+        {
+          /* BASE_A */BASE_T,
+          /* BASE_C */BASE_G,
+          /* BASE_G */BASE_C,
+          /* BASE_T */BASE_A
+        };
+      
+      for (uint32_t i = 0; i < mLength; i++)
+        for (uint32_t j = 0; j < 4; j++)
+        {
+          mBaseProb[(i << 2) + complements[j]] =
+            oldProbs[((mLength - i - 1) << 2) + j];
+        }
+    }
   }
 
-  double
-  getPosterior(
-               double pD_given_H0, double pD_given_H1
-              )
+  ~Motif()
   {
+    if (mNotChunked)
+      delete [] mBaseProb;
+  }
 
+  float
+  getPosterior(
+               float pD_given_H0, float pD_given_H1
+              ) const
+  {
     return mH1 * pD_given_H1 / (mH1 * pD_given_H1 + mH0 * pD_given_H0);
   }
 
-  double getAlternativeProbability(uint32_t position, Base b)
+  float getAlternativeProbability(uint32_t position, Base b) const
   {
     return mBaseProb[(position << 2) + b];
   }
@@ -115,16 +145,50 @@ public:
   }
 
   const std::string&
-  getAccession()
+  getAccession() const
   {
     return mAccession;
+  }
+
+  const float* getBaseProb() const
+  {
+    return mBaseProb;
+  }
+
+  float getH1() const
+  {
+    return mH1;
+  }
+
+  float getH0() const
+  {
+    return mH0;
+  }
+
+  bool isReverseComplement() const
+  {
+    return mReverseComplement;
+  }
+
+  void useConsolidatedMatrixMemory(char** aSpace)
+  {
+    mNotChunked = true;
+    float* oldData = mBaseProb;
+
+    mBaseProb = reinterpret_cast<float*>(*aSpace);
+    *aSpace += mLength * 4 * sizeof(float);
+
+    memcpy(mBaseProb, oldData, sizeof(float) * 4 * mLength);
+    
+    delete [] oldData;
   }
 
 private:
   std::string mAccession;
   uint32_t mLength;
-  double* mBaseProb;
-  double mH1, mH0;
+  float* mBaseProb;
+  float mH1, mH0;
+  bool mReverseComplement, mNotChunked;
 };
 
 class BayesianSearcher
@@ -146,7 +210,7 @@ public:
 
     std::string acc;
     uint32_t basis = 0;
-    ublas::matrix<double> matrix;
+    ublas::matrix<float> matrix;
     uint32_t max = 0;
 
     mMaxLength = 0;
@@ -161,8 +225,8 @@ public:
         // Sum the first row to see if it looks like it is normalised to a percentage...
         if (matrix.size1() > 0)
         {
-          double sum1 =
-            ublas::sum(ublas::matrix_row<ublas::matrix<double> >(matrix, 0));
+          float sum1 =
+            ublas::sum(ublas::matrix_row<ublas::matrix<float> >(matrix, 0));
           if (sum1 >= 96 && sum1 <= 104)
           {
             // It is probably a percentage matrix. Can we normalise it?
@@ -172,15 +236,18 @@ public:
               for (i = 0; i < matrix.size1(); i++)
               {
                 sum1 =
-                  ublas::sum(ublas::matrix_row<ublas::matrix<double> >(matrix, i));
-                ublas::matrix_row<ublas::matrix<double> >(matrix, i) *=
+                  ublas::sum(ublas::matrix_row<ublas::matrix<float> >(matrix, i));
+                ublas::matrix_row<ublas::matrix<float> >(matrix, i) *=
                   (basis / sum1);
               }
             }
           }
 
-          // We now have a matrix of doubles. Put it on the list...
-          motifs.push_back(new Motif(acc, matrix));
+          // We now have a matrix of floats. Put it on the list...
+          Motif *mForward = new Motif(acc, matrix);
+          motifs.push_back(mForward);
+          Motif *mReverse = new Motif(*mForward, true);
+          motifs.push_back(mReverse);
           mMaxLength = std::max(mMaxLength, matrix.size1());
         }
 
@@ -192,7 +259,7 @@ public:
       else if (boost::regex_match(l, res, FrPat))
       {
         uint32_t i = strtoul(res[1].str().c_str(), NULL, 10);
-        double count_a = strtod(res[2].str().c_str(), NULL),
+        float count_a = strtod(res[2].str().c_str(), NULL),
           count_c = strtod(res[3].str().c_str(), NULL),
           count_g = strtod(res[4].str().c_str(), NULL),
           count_t = strtod(res[5].str().c_str(), NULL);
@@ -216,7 +283,6 @@ public:
         acc = res[1];
     }
 
-    mAltProbs = new double[motifs.size()];
     std::sort(motifs.begin(), motifs.end(),
               ll::bind(&Motif::getLength, ll::_1) <
               ll::bind(&Motif::getLength, ll::_2));
@@ -229,6 +295,32 @@ public:
       mMotifLengthEnds.push_back(i);
     }
     mMotifLengthEnds.push_back(motifs.end());
+
+    // Now we go through all motifs and try to get the matrices on the same
+    // page so as to avoid cache misses later.
+    size_t needCapacity = sizeof(float) * motifs.size() +
+      sizeof(float*) * motifs.size();
+
+    for (i = motifs.begin(); i != motifs.end(); i++)
+      needCapacity += (*i)->getLength() * 4 * sizeof(float);
+
+    posix_memalign(reinterpret_cast<void**>(&mMatrixSpace),
+                   65536, needCapacity);
+
+    char *mm = mMatrixSpace;
+    mAltProbs = reinterpret_cast<float*>(mm);
+    mm += sizeof(float) * motifs.size();
+
+    mMatrixShortcuts = reinterpret_cast<const float**>(mm);
+    reinterpret_cast<char*>(mm) += sizeof(float*) * motifs.size();
+
+    const float** p = mMatrixShortcuts;
+
+    for (i = motifs.begin(); i != motifs.end(); i++)
+    {
+      (*i)->useConsolidatedMatrixMemory(&mm);
+      *p++ = (*i)->getBaseProb();
+    }
   }
 
   ~BayesianSearcher()
@@ -240,6 +332,8 @@ public:
     delete mGBP;
 
     delete [] mAltProbs;
+
+    free(mMatrixSpace);
   }
 
   void
@@ -447,10 +541,10 @@ private:
       for (uint32_t col = BASE_A; USUALLY(col < BASE_N); col++)
         mFreqTab[row * 4 + col] =
           (
-           static_cast<double>(mMajorCounts[row * 4 + col]) /
+           static_cast<float>(mMajorCounts[row * 4 + col]) /
            totMaj
            +
-           static_cast<double>(mMinorCounts[row * 4 + col]) /
+           static_cast<float>(mMinorCounts[row * 4 + col]) /
            totMin
           ) / 2.0;
     }
@@ -481,9 +575,9 @@ private:
       mlei(mMotifLengthEnds.begin());
 
     Base prev = BASE_N;
-    double pBackground = 1.0;
-    const double* e = mAltProbs + motifs.size();
-    for (double* p = mAltProbs; USUALLY(p < e); p++)
+    float pBackground = 1.0;
+    const float* e = mAltProbs + motifs.size();
+    for (float* p = mAltProbs; USUALLY(p < e); p++)
       *p = 1.0;
 
     if (RARELY(mMaxLength >= mBaseQueue.size()))
@@ -497,50 +591,35 @@ private:
       pBackground *= mFreqTab[prev * 4 + cur];
       prev = cur;
 
-      double* ap = mAltProbs + (*mlei - motifs.begin());
-      
-      for (std::vector<Motif*>::iterator i = *mlei, e = motifs.end();
-           USUALLY(i != e);
-           i++)
-        *ap++ *= (*i)->getAlternativeProbability(l, cur);
+      float* ap = mAltProbs + (*mlei - motifs.begin());
+      const float** ms = mMatrixShortcuts + (*mlei - motifs.begin()),
+           ** mse = mMatrixShortcuts + motifs.size();
+
+      // This is the most time consuming part of the program, hence why it has
+      // so many ugly optimisations to help ensure everything can be done with
+      // the registers + the L1 cache.
+      for (; USUALLY(ms != mse); ms++)
+        *ap++ *= (*ms)[(l << 2) + cur];
 
       for (std::vector<Motif*>::iterator i = *mlei, e = *(mlei + 1);
            USUALLY(i != e); i++)
       {
-        double pp = (*i)->getPosterior(pBackground, mAltProbs[i - motifs.begin()]);
-        if (pp > mPosteriorCutoff)
+        float pp = (*i)->getPosterior(pBackground, mAltProbs[i - motifs.begin()]);
+        if (RARELY(pp > mPosteriorCutoff))
         {
           const char* t = "ACGT";
-          mSegmentOutput << "     TFBS            " << mOffsetInto << ".."
-                         << (mOffsetInto + (*i)->getLength()) << std::endl
-                         << "                     /probability=\""
+
+          if (!(*i)->isReverseComplement())
+            mSegmentOutput << "     TFBS            " << mOffsetInto << ".."
+                           << (mOffsetInto + (*i)->getLength()) << std::endl;
+          else
+            mSegmentOutput << "     TFBS            complement(" << mOffsetInto << ".."
+                           << (mOffsetInto + (*i)->getLength()) << ")" << std::endl;
+
+          mSegmentOutput << "                     /probability=\""
                          << pp << "\"" << std::endl
                          << "                     /db_xref=\"TRANSFAC:"
                          << (*i)->getAccession() << "\"" << std::endl;
-#if 0
-          std::cout << "Context: "
-                    << t[mBaseQueue[index]]
-                    << t[mBaseQueue[index + 1]]
-                    << t[mBaseQueue[index + 2]]
-                    << t[mBaseQueue[index + 3]]
-                    << t[mBaseQueue[index + 4]]
-                    << t[mBaseQueue[index + 5]]
-                    << t[mBaseQueue[index + 6]]
-                    << t[mBaseQueue[index + 7]]
-                    << t[mBaseQueue[index + 8]]
-                    << t[mBaseQueue[index + 9]]
-                    << t[mBaseQueue[index + 10]]
-                    << t[mBaseQueue[index + 11]]
-                    << t[mBaseQueue[index + 12]]
-                    << t[mBaseQueue[index + 13]]
-                    << t[mBaseQueue[index + 14]]
-                    << t[mBaseQueue[index + 15]]
-                    << t[mBaseQueue[index + 16]]
-                    << t[mBaseQueue[index + 17]]
-                    << t[mBaseQueue[index + 18]]
-                    << t[mBaseQueue[index + 19]]
-                    << std::endl;
-#endif
         }
       }
     }
@@ -549,19 +628,84 @@ private:
   // Look-ahead an look-behind contexts for background frequency table.
   static const size_t kMajorLocality = 1000;
   static const size_t kMinorLocality = 250;
-  static const double mPosteriorCutoff = 0.5;
+  static const float mPosteriorCutoff = 0.5;
   uint32_t mMajorCounts[5 * 4], mMinorCounts[5 * 4], mOffsetInto;
-  double mFreqTab[5 * 4];
+  float mFreqTab[5 * 4];
   boost::circular_buffer<Base> mBaseQueue;
   std::vector<std::vector<Motif*>::iterator > mMotifLengthEnds;
   size_t mMaxLength;
-  double *mAltProbs;
+  float *mAltProbs;
 
   const fs::path& mOutputDirectory;
   fs::path mChromosomeOutput;
   std::ofstream mSegmentOutput;
+  char* mMatrixSpace;
+  const float** mMatrixShortcuts;
 
   std::vector<Motif*> motifs;
+  GenBankParser* mGBP;
+};
+
+class LocusOffsetFinder
+  : public GenBankSink
+{
+public:
+  LocusOffsetFinder()
+  {
+  }
+
+  void
+  search(const std::string& aFile)
+  {
+    TextSource* ts = NewBufferedFileSource(aFile.c_str());
+    mGBP->SetSource(ts);
+    try
+    {
+      mGBP->Parse();
+    }
+    catch (ParserException& pe)
+    {
+      std::cout << "Parse error: " << pe.what() << std::endl;
+    }
+
+    mGBP->SetSource(NULL);
+    delete ts;
+  }
+
+  void
+  OpenKeyword(const char* name, const char* value)
+  {
+    if (!::strcmp(name, "LOCUS"))
+    {
+    }
+  }
+
+  void
+  CloseKeyword()
+  {
+  }
+
+  void
+  OpenFeature(const char* name, const char* location)
+  {
+  }
+
+  void
+  CloseFeature()
+  {
+  }
+
+  void
+  Qualifier(const char* name, const char* value)
+  {
+  }
+
+  void
+  CodingData(const char* data)
+  {
+  }
+
+private:
   GenBankParser* mGBP;
 };
 
