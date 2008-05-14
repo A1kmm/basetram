@@ -14,6 +14,12 @@
 #include <boost/circular_buffer.hpp>
 #include <boost/lambda/lambda.hpp>
 #include <boost/lambda/bind.hpp>
+#ifndef NON_MPI
+#include <boost/mpi/environment.hpp>
+#include <boost/mpi/communicator.hpp>
+#include <boost/serialization/vector.hpp>
+#include <boost/serialization/utility.hpp>
+#endif
 #include <cmath>
 #include <assert.h>
 #include "../parsegenbank/GenbankParser.hpp"
@@ -36,6 +42,9 @@ namespace fs = boost::filesystem;
 namespace ublas = boost::numeric::ublas;
 namespace ll = boost::lambda;
 namespace pt = boost::posix_time;
+#ifndef NON_MPI
+namespace mpi = boost::mpi;
+#endif
 
 enum Base
 {
@@ -172,7 +181,7 @@ public:
 
   void useConsolidatedMatrixMemory(char** aSpace)
   {
-    mNotChunked = true;
+    mNotChunked = false;
     float* oldData = mBaseProb;
 
     mBaseProb = reinterpret_cast<float*>(*aSpace);
@@ -331,19 +340,17 @@ public:
 
     delete mGBP;
 
-    delete [] mAltProbs;
-
     free(mMatrixSpace);
   }
 
   void
-  search(const std::string& aFile)
+  search(const std::string& aFile, uint32_t aSeekTo = 0)
   {
     mChromosomeOutput = mOutputDirectory;
     mChromosomeOutput /= fs::basename(aFile);
     fs::create_directories(mChromosomeOutput);
 
-    TextSource* ts = NewBufferedFileSource(aFile.c_str());
+    TextSource* ts = NewBufferedFileSource(aFile.c_str(), aSeekTo);
     mGBP->SetSource(ts);
     try
     {
@@ -651,14 +658,17 @@ class LocusOffsetFinder
 {
 public:
   LocusOffsetFinder()
+    : mGBP(NewGenBankParser())
   {
+    mGBP->SetSink(this);
   }
 
-  void
+  std::vector<uint32_t>&
   search(const std::string& aFile)
   {
-    TextSource* ts = NewBufferedFileSource(aFile.c_str());
-    mGBP->SetSource(ts);
+    mOffsets.clear();
+    mTS = NewBufferedFileSource(aFile.c_str());
+    mGBP->SetSource(mTS);
     try
     {
       mGBP->Parse();
@@ -669,7 +679,9 @@ public:
     }
 
     mGBP->SetSource(NULL);
-    delete ts;
+    delete mTS;
+
+    return mOffsets;
   }
 
   void
@@ -677,6 +689,11 @@ public:
   {
     if (!::strcmp(name, "LOCUS"))
     {
+      size_t offset
+        ((mTS->getOffset() - mGBP->CountBufferedBytes())
+         - 14 - strlen(value));
+
+      mOffsets.push_back(offset);
     }
   }
 
@@ -707,11 +724,18 @@ public:
 
 private:
   GenBankParser* mGBP;
+  TextSource* mTS;
+  std::vector<uint32_t> mOffsets;
 };
 
 int
 main(int argc, char** argv)
 {
+#ifndef NON_MPI
+  mpi::environment env(argc, argv);
+  mpi::communicator world;
+#endif
+
   std::string matrices, genbank, outdir;
 
   po::options_description desc("Allowed options");
@@ -759,10 +783,12 @@ main(int argc, char** argv)
     return 1;
   }
 
+#ifdef NON_MPI
   io::filtering_istream fsmatrices;
   fsmatrices.push(io::file_source(matrices));
 
   fs::path outdirp(outdir);
+
   BayesianSearcher searcher(fsmatrices, outdirp);
 
   gStartupTime = pt::microsec_clock::universal_time();
@@ -773,4 +799,145 @@ main(int argc, char** argv)
       continue;
     searcher.search(it->path().string());
   }
+#else
+  if (world.size() < 2)
+  {
+    std::cerr << "Sorry, you must have at least two MPI processes - one for "
+              << "control and one or more worker processes."
+              << std::endl;
+    return 1;
+  }
+
+  if (world.rank() == 0)
+  {
+    uint32_t nWorkers = world.size() - 1;
+
+    // Make a list of chromosomes and assign workers to them...
+    uint32_t index = 0;
+    
+    std::map<uint32_t, fs::path> chromosomesByWorker;
+
+    for (fs::directory_iterator it(genbank); it != fs::directory_iterator();
+         it++)
+    {
+      if (fs::extension(it->path()) != ".gbk")
+        continue;
+      uint32_t worker = (index++ % nWorkers) + 1;
+      chromosomesByWorker.insert(std::pair<uint32_t, fs::path>
+                                 (worker, it->path()));
+      std::cout << "Starting worker " << worker << " on scan of "
+                << it->path().string() << std::endl;
+      world.send(worker, 0, true);
+      world.send(worker, 0, it->path().string());
+    }
+
+    // Let all workers know the scan phase is over and they should prepare for
+    // messages to start searching contigs...
+    for (uint32_t worker = 1; worker <= nWorkers; worker++)
+      world.send(worker, 0, false);
+
+    std::list<std::pair<std::string, uint32_t> > contigs;
+    while (chromosomesByWorker.size())
+    {
+      std::vector<uint32_t> data;
+      mpi::status s(world.recv(mpi::any_source, 0, data));
+
+      std::map<uint32_t, fs::path>::iterator cbw
+        (chromosomesByWorker.find(s.source()));
+
+      for (std::vector<uint32_t>::iterator di = data.begin();
+           di != data.end();
+           di++)
+        contigs.push_back(std::pair<std::string, uint32_t>
+                          ((*cbw).second.string(), *di));
+
+      chromosomesByWorker.erase(cbw);
+    }
+
+    std::cout << "Preliminary scan of contigs complete."
+              << std::endl;
+
+    std::list<uint32_t> availableWorkers;
+    for (uint32_t i = 1; i <= nWorkers; i++)
+      availableWorkers.push_back(i);
+
+    while (!contigs.empty() || (availableWorkers.size() != nWorkers))
+    {
+      while (!availableWorkers.empty() &&
+             !contigs.empty())
+      {
+        uint32_t worker = availableWorkers.back();
+        availableWorkers.pop_back();
+        world.send(worker, 1, true);
+        std::cout << "Starting worker " << worker
+                  << " on search of " << contigs.front().first
+                  << " contig at " << contigs.front().second
+                  << std::endl;
+        world.send(worker, 1, contigs.front());
+        contigs.pop_front();
+      }
+
+      mpi::status s(world.recv(mpi::any_source, 1));
+      uint32_t worker(s.source());
+
+      std::cout << "Worker " << worker << " is now free."
+                << std::endl;
+      availableWorkers.push_back(worker);
+    }
+
+    for (uint32_t worker = 1; worker <= nWorkers; worker++)
+      world.send(worker, 1, false);
+
+    return 0;
+  }
+
+  // If we get here, we are a worker process. Carry out any scan commands we
+  // get...
+  {
+    LocusOffsetFinder lof;
+    while (true)
+    {
+      bool stillScanning;
+      world.recv(0, 0, stillScanning);
+      
+      if (!stillScanning)
+        break;
+
+      std::string chromosome;
+      world.recv(0, 0, chromosome);
+
+      std::cout << "[" << world.rank() << "]: Received instruction to scan "
+                << chromosome << std::endl;
+
+      std::vector<uint32_t>& r(lof.search(chromosome));
+
+      world.send(0, 0, r);
+    }
+  }
+
+  {
+    io::filtering_istream fsmatrices;
+    fsmatrices.push(io::file_source(matrices));
+    
+    fs::path outdirp(outdir);
+    
+    BayesianSearcher searcher(fsmatrices, outdirp);
+
+    while (true)
+    {
+      bool stillSearching;
+      world.recv(0, 0, stillSearching);
+      
+      if (!stillSearching)
+        break;
+
+      std::pair<std::string, uint32_t> contig;
+      world.recv(0, 1, contig);
+      searcher.search(contig.first, contig.second);
+
+      // and tell the controller we finished...
+      world.send(0, 1);
+    }
+  }
+#endif
 }
