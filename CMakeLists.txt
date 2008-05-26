@@ -6,4 +6,4 @@ INCLUDE_DIRECTORIES(${Boost_INCLUDE_DIRS})
 LINK_DIRECTORIES(${Boost_LIBRARY_DIRS} ../parsegenbank)
 
 ADD_EXECUTABLE(basetram BaSeTraM.cpp)
-TARGET_LINK_LIBRARIES(basetram boost_serialization boost_program_options boost_iostreams boost_regex boost_filesystem boost_mpi GenBankParser)
+TARGET_LINK_LIBRARIES(basetram boost_serialization boost_program_options boost_iostreams boost_regex boost_filesystem boost_mpi boost_system GenBankParser)
