@@ -927,7 +927,7 @@ main(int argc, char** argv)
     while (true)
     {
       bool stillSearching;
-      world.recv(0, 0, stillSearching);
+      world.recv(0, 1, stillSearching);
       
       if (!stillSearching)
         break;
