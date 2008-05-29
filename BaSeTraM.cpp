@@ -842,6 +842,10 @@ main(int argc, char** argv)
     while (expectedResponses)
     {
       std::pair<std::string, std::vector<uint32_t> > data;
+
+      while (!world.iprobe(mpi::any_source, 0))
+        sleep(1);
+
       mpi::status s(world.recv(mpi::any_source, 0, data));
 
       std::cout << "Controller got response from " << s.source() << std::endl;
@@ -876,6 +880,9 @@ main(int argc, char** argv)
         world.send(worker, 1, contigs.front());
         contigs.pop_front();
       }
+
+      while (!world.iprobe(mpi::any_source, 1))
+        sleep(1);
 
       mpi::status s(world.recv(mpi::any_source, 1));
       uint32_t worker(s.source());
