@@ -588,7 +588,7 @@ private:
     for (float* p = mAltProbs; USUALLY(p < e); p++)
       *p = 1.0;
 
-    if (RARELY(mMaxLength >= mBaseQueue.size()))
+    if (RARELY(mMaxLength >= (mBaseQueue.size() - index)))
       return;
 
     for (uint32_t l = 0;
