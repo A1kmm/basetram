@@ -815,7 +815,7 @@ main(int argc, char** argv)
     // Make a list of chromosomes and assign workers to them...
     uint32_t index = 0;
     
-    std::map<uint32_t, fs::path> chromosomesByWorker;
+    uint32_t expectedResponses = 0;
 
     for (fs::directory_iterator it(genbank); it != fs::directory_iterator();
          it++)
@@ -823,8 +823,9 @@ main(int argc, char** argv)
       if (fs::extension(it->path()) != ".gbk")
         continue;
       uint32_t worker = (index++ % nWorkers) + 1;
-      chromosomesByWorker.insert(std::pair<uint32_t, fs::path>
-                                 (worker, it->path()));
+
+      expectedResponses++;
+
       std::cout << "Starting worker " << worker << " on scan of "
                 << it->path().string() << std::endl;
       world.send(worker, 0, true);
@@ -837,21 +838,18 @@ main(int argc, char** argv)
       world.send(worker, 0, false);
 
     std::list<std::pair<std::string, uint32_t> > contigs;
-    while (chromosomesByWorker.size())
+    while (expectedResponses)
     {
-      std::vector<uint32_t> data;
+      std::pair<std::string, std::vector<uint32_t> > data;
       mpi::status s(world.recv(mpi::any_source, 0, data));
 
-      std::map<uint32_t, fs::path>::iterator cbw
-        (chromosomesByWorker.find(s.source()));
+      expectedResponses--;
 
-      for (std::vector<uint32_t>::iterator di = data.begin();
-           di != data.end();
+      for (std::vector<uint32_t>::iterator di = data.second.begin();
+           di != data.second.end();
            di++)
         contigs.push_back(std::pair<std::string, uint32_t>
-                          ((*cbw).second.string(), *di));
-
-      chromosomesByWorker.erase(cbw);
+                          (data.first, *di));
     }
 
     std::cout << "Preliminary scan of contigs complete."
@@ -911,7 +909,8 @@ main(int argc, char** argv)
 
       std::vector<uint32_t>& r(lof.search(chromosome));
 
-      world.send(0, 0, r);
+      world.send(0, 0, std::pair<std::string, std::vector<uint32_t> >
+                 (chromosome, r));
     }
   }
 
