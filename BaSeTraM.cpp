@@ -1,3 +1,4 @@
+#define BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS
 #include <boost/program_options.hpp>
 #include <fstream>
 #include <iostream>
@@ -843,6 +844,7 @@ main(int argc, char** argv)
       std::pair<std::string, std::vector<uint32_t> > data;
       mpi::status s(world.recv(mpi::any_source, 0, data));
 
+      std::cout << "Controller got response from " << s.source() << std::endl;
       expectedResponses--;
 
       for (std::vector<uint32_t>::iterator di = data.second.begin();
@@ -932,6 +934,11 @@ main(int argc, char** argv)
 
       std::pair<std::string, uint32_t> contig;
       world.recv(0, 1, contig);
+
+      std::cout << "[" << world.rank() << "]: Received instruction to search "
+                << contig.first << " offset "
+		<< contig.second << std::endl;
+
       searcher.search(contig.first, contig.second);
 
       // and tell the controller we finished...
