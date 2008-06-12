@@ -102,7 +102,7 @@ public:
   Motif(const Motif& aM, bool aComplement)
     : mAccession(aM.getAccession()), mLength(aM.getLength()),
       mH1(aM.getH1()), mH0(aM.getH0()),
-      mReverseComplement(aM.isReverseComplement()),
+      mReverseComplement(aComplement),
       mNotChunked(true)
   {
     mBaseProb = new float[mLength * 4];
@@ -200,6 +200,12 @@ private:
   float mH1, mH0;
   bool mReverseComplement, mNotChunked;
 };
+
+#ifndef NON_MPI
+class WorkDoneException
+{
+};
+#endif
 
 class BayesianSearcher
   : public GenBankSink
@@ -341,15 +347,25 @@ public:
 
     delete mGBP;
 
+    if (mSegmentOutput.is_open())
+      mSegmentOutput.close();
+
     free(mMatrixSpace);
   }
 
   void
   search(const std::string& aFile, uint32_t aSeekTo = 0)
   {
+    if (mSegmentOutput.is_open())
+      mSegmentOutput.close();
+
     mChromosomeOutput = mOutputDirectory;
     mChromosomeOutput /= fs::basename(aFile);
     fs::create_directories(mChromosomeOutput);
+
+#ifndef NON_MPI
+    mSeenLocus = false;
+#endif
 
     TextSource* ts = NewBufferedFileSource(aFile.c_str(), aSeekTo);
     mGBP->SetSource(ts);
@@ -361,6 +377,11 @@ public:
     {
       std::cout << "Parse error: " << pe.what() << std::endl;
     }
+#ifndef NON_MPI
+    catch (WorkDoneException& wde)
+    {
+    }
+#endif
 
     mGBP->SetSource(NULL);
     delete ts;
@@ -381,6 +402,12 @@ public:
 
       if (mSegmentOutput.is_open())
         mSegmentOutput.close();
+
+#ifndef NON_MPI
+      if (mSeenLocus)
+        throw WorkDoneException();
+      mSeenLocus = true;
+#endif
 
       fs::path mSegmentFile = mChromosomeOutput;
       std::string locus(value);
@@ -652,6 +679,10 @@ private:
 
   std::vector<Motif*> motifs;
   GenBankParser* mGBP;
+
+#ifndef NON_MPI
+  bool mSeenLocus;
+#endif
 };
 
 class LocusOffsetFinder
