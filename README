@@ -12,3 +12,22 @@ framework.
 
 Based on the above assumptions we have developed a principled approach to the
 finding of potential motif occurrences.
+
+Installation:
+-------------
+You will need:
+  cmake - http:/www.cmake.org
+  parsegenbank - http://code.google.com/p/parsegenbank/
+    => You must extract parsegenbank and basetram so they share a common parent
+       directory. e.g.
+     src
+       parsegenbank
+       basetram
+  boost - http://www.boost.org/
+  A standards compliant C++ compiler; we used GNU GCC v4.3.x
+
+Once you have installed all the dependencies, do:
+  cmake -LA .
+  make
+
+You can now run basetram in place.
