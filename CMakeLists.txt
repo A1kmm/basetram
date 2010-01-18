@@ -1,8 +1,9 @@
+cmake_minimum_required(VERSION 2.6)
 SET(CMAKE_CXX_FLAGS_PROFILE "-O3 -DNDEBUG -pg -ggdb" CACHE STRING "Profiling compiler settings")
 SET(CMAKE_EXE_LINKER_FLAGS_PROFILE "-pg" CACHE STRING "Profiling linker settings")
 
 FIND_PACKAGE(Boost REQUIRED)
-INCLUDE_DIRECTORIES(${Boost_INCLUDE_DIRS})
+INCLUDE_DIRECTORIES(${Boost_INCLUDE_DIR})
 LINK_DIRECTORIES(${Boost_LIBRARY_DIRS} ../parsegenbank)
 
 ADD_EXECUTABLE(basetram BaSeTraM.cpp)
