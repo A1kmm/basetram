@@ -1,3 +1,5 @@
+#define NON_MPI
+
 /*
     Bayesian Search for Transcription factor Motifs.
     Copyright (C) 2008-2009  Andrew Miller
@@ -236,6 +238,7 @@ public:
     static const boost::regex BaPat("^BA[ \\t]+[ \\t]+([0-9]+)[ \\t]+.*$");
     static const boost::regex FrPat("^([0-9]+)[ \\t]+([0-9\\.]+)[ \\t]+([0-9\\.]+)"
                                     "[ \\t]+([0-9\\.]+)[ \\t]+([0-9\\.]+)[ \\t]+.*$");
+    static const boost::regex MxPat("^M([ACGT])[ \\t]+([0-9\\. \\t]+)$");
 
     mGBP->SetSink(this);
 
@@ -288,6 +291,38 @@ public:
         acc = "";
         max = 0;
         matrix.resize(0, 4);
+      }
+      else if (boost::regex_match(l, res, MxPat))
+      {
+        uint32_t base;
+        switch (res[1].str().c_str()[0])
+        {
+        case 'A':
+          base = 0;
+          break;
+        case 'C':
+          base = 1;
+          break;
+        case 'G':
+          base = 2;
+          break;
+        default:
+          base = 3;
+        }
+
+        typedef boost::tokenizer<boost::char_separator<char> > tok;
+        boost::char_separator<char> sep(" \t", "");
+        tok mytok(res[2].str(), sep);
+        uint32_t j = 0;
+        for (tok::iterator i = mytok.begin(); i != mytok.end(); i++, j++)
+        {
+          if (j > max)
+          {
+            matrix.resize(j, 4);
+            max = j;
+          }
+          matrix(j, base) = strtod((*i).c_str(), NULL);
+        }
       }
       else if (boost::regex_match(l, res, FrPat))
       {
